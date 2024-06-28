@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::fmt::{Debug, Formatter, Pointer};
+use std::fmt::{Debug, Formatter};
 use std::ops::{Add, AddAssign};
 use crossbeam::channel::Sender;
 use rustc_hash::FxHashMap;
@@ -18,9 +18,6 @@ impl MetricsContext {
             tx: RefCell::new(None),
         }
     }
-    pub fn disconnect(&self) {
-        let _ = self.tx.borrow_mut().take();
-    }
 
     pub fn snapshot(&self) -> &Snapshot {
         &self.snapshot
@@ -31,8 +28,8 @@ impl MetricsContext {
         self.snapshot.increment(metric);
 
         if self.increments.get() % 50000 == 0 {
-            let tx = self.tx.borrow();
             self.tx.borrow().as_ref().unwrap().send(self.snapshot.clone()).unwrap();
+            self.snapshot.clear();
         }
     }
 
@@ -74,6 +71,7 @@ pub trait Metric: Sized {
     fn into_metric(self) -> (MetricKey, MetricValue);
 }
 
+#[allow(dead_code)]
 pub struct Counter(pub &'static str, pub u64);
 
 impl Metric for Counter {
@@ -86,6 +84,10 @@ impl Metric for Counter {
 impl Snapshot {
     pub fn new() -> Self {
         Self(RefCell::new(FxHashMap::default()))
+    }
+
+    pub fn clear(&self) {
+        self.0.borrow_mut().values_mut().for_each(|v| *v = MetricValue::default());
     }
 
     pub fn increment<M: Metric>(&self, metric: M) {

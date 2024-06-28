@@ -1,12 +1,9 @@
-use std::cell::RefCell;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::thread::sleep;
 use std::time::Duration;
 use clap::Parser;
 use crossbeam::channel::unbounded;
-use tokio::sync::Barrier;
-use crate::metrics::{Counter, MetricKey, METRICS_CTX, MetricsContext, Snapshot};
+use crate::metrics::{MetricKey, METRICS_CTX, Snapshot};
 
 mod metrics;
 mod atomic;
@@ -47,8 +44,7 @@ fn main() {
         }).on_thread_stop({
             let tx = tx.clone();
             move || {
-                // tx.send(METRICS_CTX.with(|m| m.snapshot().clone())).unwrap();
-                // METRICS_CTX.with(|m| m.disconnect());
+                tx.send(METRICS_CTX.with(|m| m.snapshot().clone())).unwrap();
             }
         });
     }
