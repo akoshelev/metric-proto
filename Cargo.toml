@@ -1,0 +1,10 @@
+[package]
+name = "metric-proto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5.8", features = ["derive"] }
+crossbeam = "0.8.4"
+rustc-hash = "2.0.0"
+tokio = { version = "1.38.0", features = ["full"]}
