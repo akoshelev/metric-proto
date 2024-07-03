@@ -2,16 +2,18 @@
 #![allow(unused_imports)]
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use clap::Parser;
 use crossbeam::channel::unbounded;
 use tokio::sync::Barrier;
+use crate::atomic::ATOMIC_CTX;
 use crate::metrics::{MetricKey, METRICS_CTX, Snapshot};
 
 mod metrics;
 mod atomic;
+mod dimensions;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -48,9 +50,17 @@ fn main() {
         rt_builder.worker_threads(thread_count as usize);
     }
 
-    let (rt, tx, rx) = if args.mode == "atomic" {
-        (rt_builder.build().unwrap(), None, None)
-    } else {
+    let (rt, tx, rx, atomic_cnt) = if args.mode == "atomic" {
+        let counter = Arc::new(AtomicU64::default());
+        rt_builder.on_thread_start({
+            let counter = counter.clone();
+            move || {
+                let counter = Arc::clone(&counter);
+                ATOMIC_CTX.with(move |m| m.connect(counter));
+            }
+        });
+        (rt_builder.build().unwrap(), None, None, Some(counter))
+    } else if args.mode == "tlv" {
         let (tx, rx) = unbounded();
         rt_builder.on_thread_start({
             let tx = tx.clone();
@@ -78,29 +88,34 @@ fn main() {
             }
         });
 
-        (rt_builder.build().unwrap(), Some(tx), Some(rx))
+        (rt_builder.build().unwrap(), Some(tx), Some(rx), None)
+    } else {
+        panic!("unsupported mode: {}", args.mode);
     };
     drop(rt_builder);
 
     let start = Instant::now();
     for _ in 0..args.tasks {
-        if args.mode == "atomic" {
-            rt.spawn(atomic::do_work_async());
-        } else {
-            rt.spawn(metrics::do_work_async());
+        match args.mode.as_ref() {
+            "atomic" => { rt.spawn(atomic::do_work_async()); },
+            "tlv" => { rt.spawn(metrics::do_work_async()); },
+            _ => unreachable!()
         }
     }
     println!("tasks started in {:?}", start.elapsed());
 
-    drop(tx);
 
     let metric = if args.mode == "atomic" {
-        while atomic::COUNTER.load(Ordering::Acquire) < args.max_val {
+        let counter = atomic_cnt.unwrap();
+        while counter.load(Ordering::Relaxed) < args.max_val {
             sleep(Duration::from_nanos(10));
+            // counter.fetch_add(10_000, Ordering::Relaxed);
         }
         rt.shutdown_background();
-        atomic::COUNTER.load(Ordering::Acquire)
-    } else {
+        counter.load(Ordering::Relaxed)
+    } else if args.mode == "tlv" {
+        drop(tx);
+
         let mut snapshot = Snapshot::new();
         let rx = rx.unwrap();
         while let Ok(t) = rx.recv() {
@@ -112,6 +127,8 @@ fn main() {
         }
 
         snapshot.get(&MetricKey).unwrap().0
+    } else {
+        unreachable!()
     };
     println!("mode: {}, metric: {:?}, elapsed {:?}", args.mode, metric, start.elapsed());
 }

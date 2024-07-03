@@ -28,7 +28,7 @@ impl MetricsContext {
         let snapshot_mut = snapshot.as_mut().unwrap();
         if snapshot_mut.increment(metric) && self.tx.borrow().is_some() {
             let copy = snapshot_mut.take();
-            self.tx.borrow().as_ref().unwrap().send(copy).unwrap();
+            let _ = self.tx.borrow().as_ref().unwrap().send(copy);
         }
     }
 
@@ -133,10 +133,14 @@ pub const KEY: &str = "metric.1";
 
 pub async fn do_work_async() {
     loop {
+        let mut iter = 0;
         METRICS_CTX.with(|m| {
             m.increment(Counter(KEY, 1));
         });
-        tokio::task::yield_now().await;
+        iter += 1;
+        if iter % 100 == 0 {
+            tokio::task::yield_now().await;
+        }
     }
 }
 
