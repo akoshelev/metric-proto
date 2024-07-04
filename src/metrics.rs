@@ -1,9 +1,8 @@
 use std::cell::{RefCell};
 use std::fmt::{Debug, Formatter};
 use std::ops::{Add, AddAssign};
-use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
-use rustc_hash::FxHashMap;
+use crate::dimensions::{HelperIdentity, MetricName, MetricStore};
 
 pub struct MetricsContext {
     snapshot: RefCell<Option<Snapshot>>,
@@ -60,7 +59,7 @@ impl AddAssign for MetricValue {
 
 #[derive(Clone)]
 pub struct Snapshot {
-    store: FxHashMap<MetricKey, MetricValue>,
+    store: MetricStore,
     cnt: usize
 }
 
@@ -74,15 +73,23 @@ impl Debug for Snapshot {
 }
 
 pub trait Metric: Sized {
-    fn into_metric(self) -> (MetricKey, MetricValue);
+    fn into_metric(&self) -> (MetricName, MetricValue);
 }
 
 #[allow(dead_code)]
 pub struct Counter(pub &'static str, pub u64);
 
 impl Metric for Counter {
-    fn into_metric(self) -> (MetricKey, MetricValue) {
-        (MetricKey, MetricValue(self.1))
+    fn into_metric(&self) -> (MetricName, MetricValue) {
+        (MetricName::with_no_labels(self.0), MetricValue(self.1))
+    }
+}
+
+pub struct OneDimensionCounter(pub &'static str, pub HelperIdentity, pub u64);
+
+impl Metric for OneDimensionCounter {
+    fn into_metric(&self) -> (MetricName, MetricValue) {
+        (MetricName::with_one_label(self.0, "dest", &self.1), MetricValue(self.2))
     }
 }
 
@@ -90,7 +97,7 @@ impl Metric for Counter {
 impl Snapshot {
     pub fn new() -> Self {
         Self {
-            store: FxHashMap::default(),
+            store: Default::default(),
             cnt: 0,
         }
     }
@@ -106,36 +113,55 @@ impl Snapshot {
     // #[inline]
     pub fn increment<M: Metric>(&mut self, metric: M) -> bool {
         let (key, value) = metric.into_metric();
-        *self.store.entry(key).or_insert_with(|| MetricValue::default()) += value;
+        self.store.update(&key, value.0);
         self.cnt += 1;
 
         self.cnt >= 50_000
     }
 
-    pub fn merge(&mut self, other: &Self) {
-        for (key, value) in other.store.iter() {
-            *self.store.entry(key.clone()).or_insert_with(|| MetricValue::default()) += *value;
-        }
+    pub fn merge(&mut self, other: Self) {
+        self.store.merge(other.store);
     }
 
-    pub fn get(&self, key: &MetricKey) -> Option<MetricValue> {
-        self.store.get(key).copied()
+    pub fn get(&self, key: &MetricName) -> Option<u64> {
+        self.store.get_counter(key)
+    }
+
+    pub fn get_all_dims(&self, key: &'static str) -> Option<u64> {
+        self.store.get_counter_all_dim(key)
     }
 }
 
 thread_local! {
-    // TODO: const context makes it faster but hashmap does not support it
-    // given that I need connect, it should be possible to use const
     pub static METRICS_CTX: MetricsContext = const { MetricsContext::new() }
 }
 
-pub const KEY: &str = "metric.1";
+pub const KEY: &str = "metric";
 
 pub async fn do_work_async() {
     loop {
         let mut iter = 0;
         METRICS_CTX.with(|m| {
             m.increment(Counter(KEY, 1));
+        });
+        iter += 1;
+        if iter % 100 == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+pub async fn do_work_async_one_dim() {
+    loop {
+        let mut iter = 0;
+        METRICS_CTX.with(|m| {
+            if iter % 3 == 0 {
+                m.increment(OneDimensionCounter(KEY, HelperIdentity::H3, 1));
+            } else if iter & (iter - 1) == 0 {
+                m.increment(OneDimensionCounter(KEY, HelperIdentity::H2, 1));
+            } else {
+                m.increment(OneDimensionCounter(KEY, HelperIdentity::H1, 1));
+            }
         });
         iter += 1;
         if iter % 100 == 0 {
